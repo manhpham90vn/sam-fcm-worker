@@ -5,30 +5,61 @@ Description: >
 
   Sample SAM Template for sam-fcm-worker
 
-# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Parameters:
+  Stage:
+    Type: String
+    Default: staging
+    AllowedValues:
+      - staging
+      - product
+
+Mappings:
+  Configs:
+    staging:
+      RedisSecretName: fcm-worker-staging-redis
+    product:
+      RedisSecretName: fcm-worker-product-redis
+
 Globals:
   Function:
-    Timeout: 3
-
-    # You can add LoggingConfig parameters such as the Logformat, Log Group, and SystemLogLevel or ApplicationLogLevel. Learn more here https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-loggingconfig.
+    Timeout: 30
+    MemorySize: 256
+    Tracing: Active
     LoggingConfig:
       LogFormat: JSON
-Resources:
-  HelloWorldFunction:
-    Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
-    Properties:
-      CodeUri: hello-world/
-      Handler: app.lambdaHandler
-      Runtime: nodejs24.x
-      Architectures:
+    Runtime: nodejs24.x
+    Architectures:
       - x86_64
+
+Resources:
+  FCMMainQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: fcm-main-queue
+      VisibilityTimeout: 60
+
+  FCMWorker:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: fcm-worker
+      CodeUri: fcm-worker
+      Handler: app.lambdaHandler
+      Environment:
+        Variables:
+          REDIS_URL: !Sub
+            - '{{resolve:secretsmanager:${SecretName}:SecretString:REDIS_URL}}'
+            - { SecretName: !FindInMap [ Configs, !Ref Stage, RedisSecretName ] }
       Events:
-        HelloWorld:
-          Type: Api # More info about API Event Source: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#api
+        SQSEvent:
+          Type: SQS
           Properties:
-            Path: /hello
-            Method: get
-    Metadata: # Manage esbuild properties
+            Queue: !GetAtt FCMMainQueue.Arn
+            BatchSize: 1
+            MaximumBatchingWindowInSeconds: 0
+            ScalingConfig:
+              MaximumConcurrency: 10
+            Enabled: true
+    Metadata:
       BuildMethod: esbuild
       BuildProperties:
         Minify: true
@@ -36,18 +67,3 @@ Resources:
         Sourcemap: true
         EntryPoints:
         - app.ts
-
-Outputs:
-  # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
-  # Find out more about other implicit resources you can reference within SAM
-  # https://github.com/awslabs/serverless-application-model/blob/master/docs/internals/generated_resources.rst#api
-  HelloWorldApi:
-    Description: API Gateway endpoint URL for Prod stage for Hello World 
-      function
-    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}/Prod/hello/"
-  HelloWorldFunction:
-    Description: Hello World Lambda Function ARN
-    Value: !GetAtt HelloWorldFunction.Arn
-  HelloWorldFunctionIamRole:
-    Description: Implicit IAM Role created for Hello World function
-    Value: !GetAtt HelloWorldFunctionRole.Arn
