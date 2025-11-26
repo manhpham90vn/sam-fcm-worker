@@ -4,7 +4,7 @@ import Redis, { RedisOptions } from 'ioredis';
 
 let client: Redis;
 
-const MAX_BATCHES_PER_MINUTE = 2; // 1200
+const MAX_BATCHES_PER_MINUTE = 1200;
 const WINDOW_SECONDS = 60;
 const FCM_THROTTLE_KEY = 'fcm_throttle_key';
 const MAX_RECEIVE_COUNT = 5;
