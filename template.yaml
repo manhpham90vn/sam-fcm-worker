@@ -16,16 +16,20 @@ Parameters:
 Mappings:
   Configs:
     staging:
-      RedisSecretName: fcm-worker-staging-redis
-      QueueName: fcm-main-queue-staging-sqs
+      SecretName: fcm-worker-redis-staging
+      QueueName: fcm-main-queue-sqs
+      SubnetIds: "subnet-0dfc81faba494ecd0,subnet-0e1347a5c00994b52"
+      SecurityGroupIds: "sg-078527d451f97cd7e"
     product:
-      RedisSecretName: fcm-worker-product-redis
-      QueueName: fcm-main-queue-product-sqs
+      SecretName: fcm-worker-redis-prod
+      QueueName: fcm-main-queue-sqs
+      SubnetIds: []
+      SecurityGroupIds: []
 
 Globals:
   Function:
-    Timeout: 30
-    MemorySize: 256
+    Timeout: 60
+    MemorySize: 512
     Tracing: Active
     LoggingConfig:
       LogFormat: JSON
@@ -37,7 +41,10 @@ Resources:
   FCMMainQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: !FindInMap [ Configs, !Ref Stage, QueueName ]
+      QueueName: !Sub
+        - '${BaseName}-${State}'
+        - BaseName: !FindInMap [ Configs, !Ref Stage, QueueName ]
+          State: !Ref Stage
       VisibilityTimeout: 60
       RedrivePolicy:
         deadLetterTargetArn: !GetAtt FCMDeadLetterQueue.Arn
@@ -47,14 +54,27 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub
-        - '${BaseName}-dlq'
+        - '${BaseName}-dlq-${State}'
         - BaseName: !FindInMap [ Configs, !Ref Stage, QueueName ]
+          State: !Ref Stage
       MessageRetentionPeriod: 1209600
+
+  FCMWorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub
+        - '/aws/lambda/${BaseName}-${State}'
+        - BaseName: !FindInMap [ Configs, !Ref Stage, QueueName ]
+          State: !Ref Stage
+      RetentionInDays: 30
 
   FCMWorker:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: fcm-worker
+      FunctionName: !Sub
+        - '${BaseName}-${State}'
+        - BaseName: !FindInMap [ Configs, !Ref Stage, QueueName ]
+          State: !Ref Stage
       CodeUri: fcm-worker
       Handler: app.lambdaHandler
       Environment:
@@ -62,7 +82,10 @@ Resources:
           Stage: !Ref Stage
           REDIS_URL: !Sub
             - '{{resolve:secretsmanager:${SecretName}:SecretString:REDIS_URL}}'
-            - { SecretName: !FindInMap [ Configs, !Ref Stage, RedisSecretName ] }
+            - { SecretName: !FindInMap [ Configs, !Ref Stage, SecretName ] }
+      VpcConfig:
+        SubnetIds: !Split [ ",", !FindInMap [ Configs, !Ref Stage, SubnetIds ] ]
+        SecurityGroupIds: !Split [ ",", !FindInMap [ Configs, !Ref Stage, SecurityGroupIds ] ]
       Events:
         SQSEvent:
           Type: SQS

@@ -7,7 +7,8 @@ let client: Redis;
 const MAX_BATCHES_PER_MINUTE = 1200;
 const WINDOW_SECONDS = 60;
 const FCM_THROTTLE_KEY = 'fcm_throttle_key';
-const MAX_RECEIVE_COUNT = 5;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function getRedis() {
     if (!client) {
@@ -16,6 +17,7 @@ function getRedis() {
             throw new Error('REDIS_URL is not set');
         }
         const redisUrl = new URL(url);
+        const isTls = redisUrl.protocol === 'rediss:';
         const options: RedisOptions = {
             host: redisUrl.hostname,
             port: Number(redisUrl.port) || 6379,
@@ -29,6 +31,12 @@ function getRedis() {
                 return times * 200;
             },
             enableOfflineQueue: false,
+            lazyConnect: true,
+            ...(isTls && {
+                tls: {
+                    servername: redisUrl.hostname,
+                },
+            }),
         };
         client = new Redis(options);
     }
@@ -38,24 +46,19 @@ function getRedis() {
 export const lambdaHandler = async (event: SQSEvent, context: Context): Promise<void> => {
     console.log('Received event:', JSON.stringify(event));
 
-    let redis: Redis;
+    const redis = getRedis();
 
-    try {
-        redis = getRedis();
-    } catch (err) {
-        console.error('Failed to init Redis client', err);
-        throw err;
+    if (!redis.status || redis.status === 'end' || redis.status === 'wait') {
+        console.log('Redis status:', redis.status, 'connecting...');
+        await redis.connect();
     }
 
     for (const record of event.Records as SQSRecord[]) {
-        console.log('Raw SQS body:', record.body);
-
-        const receiveCount = Number(record.attributes?.ApproximateReceiveCount ?? '1');
-
-        if (receiveCount > MAX_RECEIVE_COUNT) {
-            console.log(`Message exceeded max receive count (${MAX_RECEIVE_COUNT}) STOP`);
-            continue;
-        }
+        console.log(
+            `Processing message. Request ID: ${context.awsRequestId}, Receive Count: ${Number(
+                record.attributes?.ApproximateReceiveCount ?? '1',
+            )}`,
+        );
 
         try {
             const payload = JSON.parse(record.body);
@@ -68,8 +71,10 @@ export const lambdaHandler = async (event: SQSEvent, context: Context): Promise<
                     async () => {
                         if (type === 'topic') {
                             console.log('Pushing topic', title, body, topic);
+                            await sleep(3000);
                         } else if (type === 'tokens') {
                             console.log('Pushing tokens', title, body, tokens);
+                            await sleep(3000);
                         }
                     },
                     async () => {

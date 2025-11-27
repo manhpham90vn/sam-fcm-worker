@@ -23,3 +23,9 @@ docker run --name redis-test -p 6379:6379 -d redis:7
 cd fcm-worker
 npm run unit
 ```
+
+## Send message test to SQS
+
+```shell
+./test.sh
+```
