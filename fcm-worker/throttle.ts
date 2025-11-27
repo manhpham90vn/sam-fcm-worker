@@ -1,24 +1,68 @@
 import type { Redis } from 'ioredis';
 
 export const DURATION_LIMITER_LUA = `
+-- KEYS[1]  : limiter key
+-- ARGV[1]  : nowSeconds (float)
+-- ARGV[2]  : nowIntSeconds (integer, window start)
+-- ARGV[3]  : decay (window size in seconds)
+-- ARGV[4]  : maxLocks (max allowed operations per window)
+
+local key        = KEYS[1]
+local now        = tonumber(ARGV[1])
+local now_start  = tonumber(ARGV[2])
+local decay      = tonumber(ARGV[3])
+local max_locks  = tonumber(ARGV[4])
+
 local function reset()
-    redis.call('HMSET', KEYS[1], 'start', ARGV[2], 'end', ARGV[2] + ARGV[3], 'count', 1)
-    return redis.call('EXPIRE', KEYS[1], ARGV[3] * 2)
+  -- Start a new window [now_start, now_start + decay]
+  local window_start = now_start
+  local window_end   = now_start + decay
+
+  redis.call('HSET',
+    key,
+    'start', window_start,
+    'end',   window_end,
+    'count', 1
+  )
+
+  -- Keep the key alive for 2x the window size
+  redis.call('EXPIRE', key, decay * 2)
+
+  local remaining = max_locks - 1
+  if remaining < 0 then
+    remaining = 0
+  end
+
+  -- Return: { allowed, decaysAt, remaining }
+  return { true, window_end, remaining }
 end
 
-if redis.call('EXISTS', KEYS[1]) == 0 then
-    return {reset(), ARGV[2] + ARGV[3], ARGV[4] - 1}
+-- If the limiter key does not exist, initialize a new window
+if redis.call('EXISTS', key) == 0 then
+  return reset()
 end
 
-if ARGV[1] >= redis.call('HGET', KEYS[1], 'start') and ARGV[1] <= redis.call('HGET', KEYS[1], 'end') then
-    return {
-        tonumber(redis.call('HINCRBY', KEYS[1], 'count', 1)) <= tonumber(ARGV[4]),
-        redis.call('HGET', KEYS[1], 'end'),
-        ARGV[4] - redis.call('HGET', KEYS[1], 'count')
-    }
+-- Key exists: read current window
+local current_start = tonumber(redis.call('HGET', key, 'start'))
+local current_end   = tonumber(redis.call('HGET', key, 'end'))
+
+-- If we are still inside the current window
+if now >= current_start and now <= current_end then
+  -- Same as original logic: increment count with HINCRBY
+  local new_count = tonumber(redis.call('HINCRBY', key, 'count', 1))
+
+  local allowed   = new_count <= max_locks
+  local remaining = max_locks - new_count
+  if remaining < 0 then
+    remaining = 0
+  end
+
+  -- Return: { allowed, decaysAt, remaining }
+  return { allowed, current_end, remaining }
 end
 
-return {reset(), ARGV[2] + ARGV[3], ARGV[4] - 1}
+-- Window expired: start a new window
+return reset()
 ` as const;
 
 export interface DurationAcquireResult {
@@ -36,6 +80,11 @@ export async function durationAcquire(
     const nowSeconds = Date.now() / 1000;
     const nowIntSeconds = Math.floor(nowSeconds);
 
+    // ARGV mapping:
+    // 1: nowSeconds
+    // 2: nowIntSeconds
+    // 3: decay
+    // 4: maxLocks
     const res = (await redis.eval(DURATION_LIMITER_LUA, 1, name, nowSeconds, nowIntSeconds, decay, maxLocks)) as [
         number | string | boolean,
         number | string,
@@ -63,26 +112,46 @@ export class DurationLimiterBuilder {
         this.name = name;
     }
 
+    /**
+     * Set the maximum number of allowed operations in a time window.
+     */
     allow(maxLocks: number): this {
         this.maxLocks = maxLocks;
         return this;
     }
 
+    /**
+     * Set the window size in seconds.
+     */
     every(decaySeconds: number): this {
         this.decay = decaySeconds;
         return this;
     }
 
+    /**
+     * Set the maximum time (in seconds) to wait for a slot.
+     * If timeout <= 0, it will only try once without waiting.
+     */
     block(timeoutSeconds: number): this {
         this.timeout = timeoutSeconds;
         return this;
     }
 
+    /**
+     * Set the sleep duration (in milliseconds) between retries
+     * when waiting for a slot.
+     */
     sleep(ms: number): this {
         this.sleepMs = ms;
         return this;
     }
 
+    /**
+     * Run the limiter and execute the callback when allowed.
+     * If not allowed:
+     *  - if `failure` is provided, it will be called with the limiter info
+     *  - otherwise it throws (when timeout > 0) or returns false (when timeout <= 0)
+     */
     async then<T = any>(
         callback: () => Promise<T> | T,
         failure?: (info: DurationAcquireResult) => Promise<T | boolean> | T | boolean,
@@ -99,6 +168,7 @@ export class DurationLimiterBuilder {
             return { ok: false, info };
         };
 
+        // No waiting: try only once
         if (this.timeout <= 0) {
             const { ok, info } = await tryOnce();
 
@@ -113,6 +183,7 @@ export class DurationLimiterBuilder {
             return false;
         }
 
+        // With timeout: retry until allowed or timeout exceeded
         while (true) {
             const { ok, info } = await tryOnce();
 
@@ -137,6 +208,9 @@ export class DurationLimiterBuilder {
     }
 }
 
+/**
+ * Helper to create a DurationLimiterBuilder with a given Redis client and key name.
+ */
 export function throttle(redis: Redis, name: string): DurationLimiterBuilder {
     return new DurationLimiterBuilder(redis, name);
 }

@@ -43,8 +43,8 @@ export const lambdaHandler = async (event: SQSEvent, context: Context): Promise<
     try {
         redis = getRedis();
     } catch (err) {
-        console.error('Failed to init Redis client, STOP', err);
-        return;
+        console.error('Failed to init Redis client', err);
+        throw err;
     }
 
     for (const record of event.Records as SQSRecord[]) {
@@ -54,7 +54,7 @@ export const lambdaHandler = async (event: SQSEvent, context: Context): Promise<
 
         if (receiveCount > MAX_RECEIVE_COUNT) {
             console.log(`Message exceeded max receive count (${MAX_RECEIVE_COUNT}) STOP`);
-            return;
+            continue;
         }
 
         try {
@@ -79,11 +79,6 @@ export const lambdaHandler = async (event: SQSEvent, context: Context): Promise<
                 );
         } catch (err) {
             console.error('Error handling SQS message:', err);
-
-            if (err instanceof SyntaxError) {
-                console.warn('Invalid JSON, skipping message STOP');
-                return;
-            }
 
             throw err;
         }

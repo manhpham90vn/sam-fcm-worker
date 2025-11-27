@@ -17,8 +17,10 @@ Mappings:
   Configs:
     staging:
       RedisSecretName: fcm-worker-staging-redis
+      QueueName: fcm-main-queue-staging-sqs
     product:
       RedisSecretName: fcm-worker-product-redis
+      QueueName: fcm-main-queue-product-sqs
 
 Globals:
   Function:
@@ -35,8 +37,19 @@ Resources:
   FCMMainQueue:
     Type: AWS::SQS::Queue
     Properties:
-      QueueName: fcm-main-queue
+      QueueName: !FindInMap [ Configs, !Ref Stage, QueueName ]
       VisibilityTimeout: 60
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FCMDeadLetterQueue.Arn
+        maxReceiveCount: 5
+
+  FCMDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub
+        - '${BaseName}-dlq'
+        - BaseName: !FindInMap [ Configs, !Ref Stage, QueueName ]
+      MessageRetentionPeriod: 1209600
 
   FCMWorker:
     Type: AWS::Serverless::Function
@@ -46,6 +59,7 @@ Resources:
       Handler: app.lambdaHandler
       Environment:
         Variables:
+          Stage: !Ref Stage
           REDIS_URL: !Sub
             - '{{resolve:secretsmanager:${SecretName}:SecretString:REDIS_URL}}'
             - { SecretName: !FindInMap [ Configs, !Ref Stage, RedisSecretName ] }
