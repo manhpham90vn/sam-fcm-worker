@@ -19,7 +19,7 @@ sam deploy --config-env staging --force-upload
 ## Run test
 
 ```shell
-docker run --name redis-test -p 6379:6379 -d redis:7
+docker run --rm --name redis-test -p 6379:6379 redis:7
 cd fcm-worker
 npm run unit
 ```

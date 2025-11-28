@@ -1,8 +1,6 @@
-// tests/unit/test-throttle.test.ts
 import Redis from 'ioredis';
 import { durationAcquire, throttle, DurationAcquireResult } from '../../throttle';
 
-// Increase Jest timeout for this file
 jest.setTimeout(30000);
 
 describe('durationAcquire', () => {
@@ -155,6 +153,62 @@ describe('durationAcquire', () => {
 
         expect(allowedCount).toBe(1);
         expect(blockedCount).toBe(1);
+    });
+
+    it('maintains independent windows and counters per key', async () => {
+        const maxLocks = 2;
+        const decay = 60;
+
+        const keyA = 'test_limiter_multi_key_A';
+        const keyB = 'test_limiter_multi_key_B';
+
+        const a1 = await durationAcquire(redis, keyA, maxLocks, decay);
+        const a2 = await durationAcquire(redis, keyA, maxLocks, decay);
+        const a3 = await durationAcquire(redis, keyA, maxLocks, decay);
+
+        expect(a1.allowed).toBe(true);
+        expect(a2.allowed).toBe(true);
+        expect(a3.allowed).toBe(false);
+
+        const b1 = await durationAcquire(redis, keyB, maxLocks, decay);
+        const b2 = await durationAcquire(redis, keyB, maxLocks, decay);
+        const b3 = await durationAcquire(redis, keyB, maxLocks, decay);
+
+        expect(b1.allowed).toBe(true);
+        expect(b2.allowed).toBe(true);
+        expect(b3.allowed).toBe(false);
+
+        expect(a1.decaysAt).toBe(a2.decaysAt);
+        expect(b1.decaysAt).toBe(b2.decaysAt);
+    });
+
+    it('treats now == window end as inside the current window (boundary test)', async () => {
+        const realNow = Date.now;
+
+        const alignedBaseSec = 2_000_000_000;
+        const alignedBaseMs = alignedBaseSec * 1000;
+
+        const maxLocks = 1;
+        const decay = 5;
+        const key = 'test_limiter_boundary_inclusive_end';
+
+        Date.now = () => alignedBaseMs;
+
+        const first = await durationAcquire(redis, key, maxLocks, decay);
+        expect(first.allowed).toBe(true);
+
+        // Window start = nowIntSeconds = alignedBaseSec
+        const windowStartSec = alignedBaseSec;
+        const windowEndSec = windowStartSec + decay;
+
+        Date.now = () => windowEndSec * 1000;
+
+        const atBoundary = await durationAcquire(redis, key, maxLocks, decay);
+
+        expect(atBoundary.allowed).toBe(false);
+        expect(atBoundary.decaysAt).toBe(first.decaysAt);
+
+        Date.now = realNow;
     });
 });
 
@@ -317,5 +371,45 @@ describe('DurationLimiterBuilder / throttle helper', () => {
         });
 
         expect(callback).not.toHaveBeenCalled();
+    });
+
+    it('propagates boolean result from failure handler when timeout = 0', async () => {
+        const key = 'builder_failure_boolean';
+        const callback = jest.fn();
+        const failure = jest.fn().mockResolvedValue(false);
+
+        await throttle(redis, key)
+            .allow(1)
+            .every(60)
+            .block(0)
+            .then(async () => 'first');
+
+        const result = await throttle(redis, key).allow(1).every(60).block(0).then(callback, failure);
+
+        expect(callback).not.toHaveBeenCalled();
+        expect(failure).toHaveBeenCalledTimes(1);
+        expect(result).toBe(false);
+    });
+
+    it('only runs one callback when two builder calls compete concurrently with maxLocks=1', async () => {
+        const key = 'builder_concurrent';
+        const callback1 = jest.fn().mockResolvedValue('cb1');
+        const callback2 = jest.fn().mockResolvedValue('cb2');
+        const failure1 = jest.fn().mockResolvedValue('f1');
+        const failure2 = jest.fn().mockResolvedValue('f2');
+
+        const [r1, r2] = await Promise.all([
+            throttle(redis, key).allow(1).every(60).block(0).then(callback1, failure1),
+            throttle(redis, key).allow(1).every(60).block(0).then(callback2, failure2),
+        ]);
+
+        const callbacksCalled = [callback1, callback2].filter((fn) => fn.mock.calls.length > 0).length;
+        const failuresCalled = [failure1, failure2].filter((fn) => fn.mock.calls.length > 0).length;
+
+        expect(callbacksCalled).toBe(1);
+        expect(failuresCalled).toBe(1);
+
+        expect(['cb1', 'cb2', 'f1', 'f2']).toContain(r1);
+        expect(['cb1', 'cb2', 'f1', 'f2']).toContain(r2);
     });
 });
